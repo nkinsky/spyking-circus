@@ -80,7 +80,16 @@ def check_if_done(params, flag, logger):
     return
 
 
-def main(params, nb_cpu, nb_gpu, use_gpu):
+def main(
+    params,
+    nb_cpu,
+    nb_gpu,
+    use_gpu,
+    notch_filter: str or None = None,
+    last_filter: bool = True,
+    debug_messages: bool = False,
+    padding_sec: float = 0.1,
+):
 
     logger = init_logging(params.logfile)
     logger = logging.getLogger("circus.filtering")
@@ -115,7 +124,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
         do_filtering,
         do_remove_median,
         do_remove_ground,
-        notch_filter: None or dict = None,
+        notch_filter,
     ):
         """
         Performs a high-pass and low-pass Butterworth filter on the data file.
@@ -138,6 +147,8 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
             filter_type = "highpass"
         else:
             filter_type = "notch"
+            padding_sec = 1
+            print("padding_sec changed to 1 for notch filter")
 
         try:
             cut_off = params.getfloat("filtering", "cut_off", check=False)
@@ -176,6 +187,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
         chunk_size = detect_memory(params, filtering=True)
         butter_order = params.getint("filtering", "butter_order")
         nb_chunks, _ = data_file_in.analyze(chunk_size)
+        nframes_before_filt = data_file_in.shape[0]
 
         # Construct filter
         if filter_type == "highpass":
@@ -190,7 +202,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                 Quse = np.round(notch_filter["w0"] / notch_filter["bw"])
             else:
                 Quse = notch_filter["Q"]
-            b, a = signal.iirnotch(w0=notch_filter["w0"], Q=Quse, fs=notch_filter["fs"])
+            b, a = signal.iirnotch(w0=notch_filter["w0"], Q=Quse, fs=params.rate)
         all_chunks = numpy.arange(nb_chunks, dtype=numpy.int64)
         to_process = all_chunks[comm.rank :: comm.size]
         loc_nb_chunks = len(to_process)
@@ -207,15 +219,20 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
             channel_group = list(params.probe["channel_groups"].keys())[0]
 
         process_all_channels = numpy.all(nodes == numpy.arange(N_total))
-        duration = int(0.1 * params.rate)
+        duration = int(padding_sec * params.rate)
 
         if comm.rank == 0:
             to_write = []
             if do_filtering:
-                to_write += [
-                    "Filtering with a Butterworth filter (order %d) in [%g, %g] Hz"
-                    % (butter_order, cut_off[0], cut_off[1])
-                ]
+                if filter_type == "highpass":
+                    to_write += [
+                        "Filtering with a Butterworth filter (order %d) in [%g, %g] Hz"
+                        % (butter_order, cut_off[0], cut_off[1])
+                    ]
+                elif filter_type == "notch":
+                    to_write += [
+                        f'Filtering with a notch filter (w0={notch_filter["w0"]:.1f} and Q={Quse:.1f})'
+                    ]
             if do_remove_median:
                 to_write += ["Median over all channels is subtracted to each channels"]
             if do_remove_ground:
@@ -261,6 +278,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
 
             saturation = sat_value * max_value
 
+        prev_end_chunk = None
         for count, gidx in enumerate(to_explore):
 
             is_first = data_file_in.is_first_chunk(gidx, nb_chunks)
@@ -324,9 +342,36 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
             if flag_saturation:
                 local_chunk[times, channels] = 0
 
+            # Save current chunk end
+            if filter_type == "notch":
+                current_chunk_end = local_chunk[
+                    (len_chunk - int(duration)) : (len_chunk - int(0.75 * duration))
+                ].copy()
+                if debug_messages:
+                    print("saving previous end chunk for notch filter")
+
             local_chunk = local_chunk[
                 numpy.abs(padding[0]) : len_chunk - numpy.abs(padding[1])
             ]
+
+            # Replace start chunk with previous end chunk for notch filter and save new end chunk
+            if filter_type == "notch":
+                if gidx > 0:
+                    offset = (
+                        local_chunk[prev_chunk_end.shape[0] - 1] - prev_chunk_end[-1]
+                    )
+                    # offset = local_chunk[: prev_chunk_end.shape[0]].mean(
+                    #     0
+                    # ) - prev_end_chunk.mean(axis=0)
+                    local_chunk[: prev_chunk_end.shape[0] - 1] = prev_chunk_end[:-1]
+
+                    # Align current chunk to end of previous chunk
+                    local_chunk[: prev_chunk_end.shape[0] - 1] -= offset
+                    if debug_messages:
+                        print(
+                            "overwriting start chunk with previous end chunk for notch filter"
+                        )
+                prev_chunk_end = current_chunk_end.copy()
 
             if do_remove_median:
                 if nb_shanks == 1:
@@ -365,6 +410,9 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
 
             data_file_out.set_data(g_offset, local_chunk)
 
+        if debug_messages:
+            print(str(nframes_before_filt) + " frames before filtering")
+            print(str(data_file_out.shape[0]) + " frames after filtering")
         sys.stderr.flush()
 
         comm.Barrier()
@@ -690,12 +738,20 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
             if remove_ground:
                 params.write("noedits", "ground_done", "Started")
         filter_file(
-            data_file_in, data_file_out, do_filter, remove_median, remove_ground
+            data_file_in,
+            data_file_out,
+            do_filter,
+            remove_median,
+            remove_ground,
+            notch_filter,
         )
 
     if comm.rank == 0:
         if do_filter:
-            params.write("noedits", "filter_done", "True")
+            if last_filter:
+                params.write("noedits", "filter_done", "True")
+            else:
+                params.write("noedits", "filter_done", "False")
         if remove_median:
             params.write("noedits", "median_done", "True")
         if remove_ground:
@@ -721,3 +777,26 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
         data_file_out.close()
 
     comm.Barrier()
+
+
+if __name__ == "__main__":
+    from circus.shared.parser import CircusParser
+    from pathlib import Path
+
+    dir_use = Path("/data/Working/Trace_FC/Recording_Rats/Finn/2022_01_17_habituation")
+    dat_file = sorted(dir_use.glob("*continuous_post_subset_unfiltered.dat"))[0]
+    params = CircusParser(str(dat_file))
+
+    notch_filter = [
+        {"w0": 4843.0, "bw": 45, "Q": None},
+        {"w0": 4843.0 * 3, "bw": 35, "Q": None},
+        {"w0": 60.0, "bw": None, "Q": 30.0},
+    ]
+    top_limit = 540  # 2220
+    harmonics = np.arange(180, top_limit + 1, 120)
+    bw_harm = 4
+    for harmonic in harmonics:
+        notch_filter.append({"w0": harmonic, "bw": bw_harm, "Q": None})
+
+    for idf, filter in enumerate(notch_filter):
+        main(params, 8, 0, False, filter, idf == len(notch_filter) - 1, padding_sec=1)
