@@ -13,6 +13,7 @@ from circus.shared.probes import get_nodes_and_edges
 from circus.shared.messages import print_and_log, init_logging
 from circus.shared.files import get_artefact, collect_saturation
 from circus.shared.mpi import detect_memory
+from circus.shared.parser import CircusParser
 
 
 def check_if_done(params, flag, logger):
@@ -195,14 +196,18 @@ def main(
                 butter_order, np.array(cut_off) / (params.rate / 2.0), "pass"
             )
         elif filter_type == "notch":
-            if notch_filter["Q"] is None:
-                assert (
-                    notch_filter["bw"] is float or int
-                ), "If Q is not specified, bw must be provided"
-                Quse = np.round(notch_filter["w0"] / notch_filter["bw"])
+            if "a" in notch_filter.keys() and "b" in notch_filter.keys():
+                b = notch_filter["b"]
+                a = notch_filter["a"]
             else:
-                Quse = notch_filter["Q"]
-            b, a = signal.iirnotch(w0=notch_filter["w0"], Q=Quse, fs=params.rate)
+                if notch_filter["Q"] is None:
+                    assert (
+                        notch_filter["bw"] is float or int
+                    ), "If Q is not specified, bw must be provided"
+                    Quse = np.round(notch_filter["w0"] / notch_filter["bw"])
+                else:
+                    Quse = notch_filter["Q"]
+                b, a = signal.iirnotch(w0=notch_filter["w0"], Q=Quse, fs=params.rate)
         all_chunks = numpy.arange(nb_chunks, dtype=numpy.int64)
         to_process = all_chunks[comm.rank :: comm.size]
         loc_nb_chunks = len(to_process)
@@ -777,6 +782,50 @@ def main(
         data_file_out.close()
 
     comm.Barrier()
+
+
+def miniscope_filter(dat_file, top_limit: int = 540, notch_filter=None):
+    """Denoise your dat file from miniscope-related EWL (~4830Hz) and 60Hz noise,
+    including harmnonics of each
+    :param: dat_file: str, full location of file
+    :param: top_limit: int, highest 60Hz harmonic to remove. Only seen in recordings
+    with shorted GND-REF, not with separate GND-REF"""
+
+    print("STARTING MINISCOPE DE-NOISING")
+
+    params = CircusParser(str(dat_file))
+
+    if notch_filter is None:
+        notch_filter = [
+            {"w0": 4843.0, "bw": 60, "Q": None},
+            {"w0": 4843.0 * 2, "bw": 60, "Q": None},
+            {"w0": 4843.0 * 3, "bw": 100, "Q": None},
+            {"w0": 60.0, "bw": None, "Q": 30.0},
+        ]
+    harmonics = np.arange(
+        180, top_limit + 1, 120
+    )  # Only every-other harmonic is large, ignore others
+    bw_harm = 4
+    for harmonic in harmonics:
+        notch_filter.append({"w0": harmonic, "bw": bw_harm, "Q": None})
+
+    bcomb, acomb = 1, 1
+    for idf, filter in enumerate(notch_filter):
+        if filter["Q"] is None:
+            assert (
+                filter["bw"] is float or int
+            ), "If Q is not specified, bw must be provided"
+            Quse = np.round(filter["w0"] / filter["bw"])
+        else:
+            Quse = filter["Q"]
+        # main(params, 8, 0, False, filter, idf == len(notch_filter) - 1, padding_sec=1)
+        b, a = signal.iirnotch(w0=filter["w0"], Q=Quse, fs=params.rate)
+        bcomb = np.convolve(bcomb, b)
+        acomb = np.convolve(acomb, a)
+    notch_filter_combined = {"b": bcomb, "a": acomb}
+    main(params, 8, 0, False, notch_filter_combined, True, padding_sec=1)
+
+    print("DAT FILE DE-NOISING FINISHED")
 
 
 if __name__ == "__main__":
