@@ -222,8 +222,12 @@ def main(
                 )
         else:
             channel_group = list(params.probe["channel_groups"].keys())[0]
-
-        process_all_channels = numpy.all(nodes == numpy.arange(N_total))
+        if len(nodes) == len(
+            numpy.arange(N_total)
+        ):  # backwards compatibility for numpy
+            process_all_channels = numpy.all(nodes == numpy.arange(N_total))
+        else:
+            process_all_channels = False
         duration = int(padding_sec * params.rate)
 
         if comm.rank == 0:
@@ -235,9 +239,12 @@ def main(
                         % (butter_order, cut_off[0], cut_off[1])
                     ]
                 elif filter_type == "notch":
-                    to_write += [
-                        f'Filtering with a notch filter (w0={notch_filter["w0"]:.1f} and Q={Quse:.1f})'
-                    ]
+                    if "a" in notch_filter.keys() and "b" in notch_filter.keys():
+                        to_write += [f"Filtering with pre-specified notch filter"]
+                    else:
+                        to_write += [
+                            f'Filtering with a notch filter (w0={notch_filter["w0"]:.1f} and Q={Quse:.1f})'
+                        ]
             if do_remove_median:
                 to_write += ["Median over all channels is subtracted to each channels"]
             if do_remove_ground:
@@ -794,6 +801,7 @@ def miniscope_filter(dat_file, top_limit: int = 540, notch_filter=None):
     print("STARTING MINISCOPE DE-NOISING")
 
     params = CircusParser(str(dat_file))
+    print(params)
 
     if notch_filter is None:
         notch_filter = [
@@ -819,7 +827,9 @@ def miniscope_filter(dat_file, top_limit: int = 540, notch_filter=None):
         else:
             Quse = filter["Q"]
         # main(params, 8, 0, False, filter, idf == len(notch_filter) - 1, padding_sec=1)
-        b, a = signal.iirnotch(w0=filter["w0"], Q=Quse, fs=params.rate)
+        b, a = signal.iirnotch(
+            w0=filter["w0"], Q=Quse, fs=params.getint("data", "sampling_rate")
+        )
         bcomb = np.convolve(bcomb, b)
         acomb = np.convolve(acomb, a)
     notch_filter_combined = {"b": bcomb, "a": acomb}
@@ -832,20 +842,29 @@ if __name__ == "__main__":
     from circus.shared.parser import CircusParser
     from pathlib import Path
 
-    dir_use = Path("/data/Working/Trace_FC/Recording_Rats/Finn/2022_01_17_habituation")
-    dat_file = sorted(dir_use.glob("*continuous_post_subset_unfiltered.dat"))[0]
-    params = CircusParser(str(dat_file))
+    dir_use = Path("/data3/Trace_FC/Recording_Rats/Boba/2023_05_29_habituation2")
+    dat_filename = "Boba_habituation2_w_noise.dat"
 
+    base_freq = 5028
+    base_freq2 = 5045
+    base_freq3 = 4845
+    base_freq4 = 4855
+    base_freq5 = 4815
     notch_filter = [
-        {"w0": 4843.0, "bw": 45, "Q": None},
-        {"w0": 4843.0 * 3, "bw": 35, "Q": None},
-        {"w0": 60.0, "bw": None, "Q": 30.0},
+        {"w0": base_freq, "bw": 40, "Q": None},
+        {"w0": 2 * base_freq, "bw": 40, "Q": None},
+        {"w0": base_freq2, "bw": 40, "Q": None},
+        {"w0": 2 * base_freq2, "bw": 40, "Q": None},
+        {"w0": base_freq3, "bw": 40, "Q": None},
+        {"w0": 3 * base_freq3, "bw": 40, "Q": None},
+        {"w0": 2 * base_freq3, "bw": 40, "Q": None},
+        {"w0": base_freq4, "bw": 40, "Q": None},
+        {"w0": 2 * base_freq4, "bw": 40, "Q": None},
+        {"w0": 3 * base_freq4, "bw": 40, "Q": None},
+        {"w0": 14870, "bw": 60, "Q": None},
+        {"w0": 14910, "bw": 60, "Q": None},
     ]
-    top_limit = 540  # 2220
-    harmonics = np.arange(180, top_limit + 1, 120)
-    bw_harm = 4
-    for harmonic in harmonics:
-        notch_filter.append({"w0": harmonic, "bw": bw_harm, "Q": None})
 
-    for idf, filter in enumerate(notch_filter):
-        main(params, 8, 0, False, filter, idf == len(notch_filter) - 1, padding_sec=1)
+    miniscope_filter(
+        str(dir_use / dat_filename), top_limit=0, notch_filter=notch_filter
+    )
