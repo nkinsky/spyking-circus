@@ -791,12 +791,22 @@ def main(
     comm.Barrier()
 
 
-def miniscope_filter(dat_file, top_limit: int = 540, notch_filter=None):
+def miniscope_filter(dat_file, top_limit: int = 540, bottom_limit=180, step=120, notch_filter=None):
     """Denoise your dat file from miniscope-related EWL (~4830Hz) and 60Hz noise,
     including harmnonics of each
     :param: dat_file: str, full location of file
     :param: top_limit: int, highest 60Hz harmonic to remove. Only seen in recordings
-    with shorted GND-REF, not with separate GND-REF"""
+    with shorted GND-REF, not with separate GND-REF
+    :param: bottom_limit: int, lowest 60Hz harmonic to remove
+    :param: step: int, step size for harmonics
+    :param: notch_filter: list of dicts with frequency and bandwidth(bw) or Q for filter, see code below for example:
+        notch_filter = [
+                {"w0": 4843.0, "bw": 60, "Q": None},
+                {"w0": 4843.0 * 2, "bw": 60, "Q": None},
+                {"w0": 4843.0 * 3, "bw": 100, "Q": None},
+                {"w0": 60.0, "bw": None, "Q": 30.0},
+            ]
+    """
 
     print("STARTING MINISCOPE DE-NOISING")
 
@@ -811,7 +821,7 @@ def miniscope_filter(dat_file, top_limit: int = 540, notch_filter=None):
             {"w0": 60.0, "bw": None, "Q": 30.0},
         ]
     harmonics = np.arange(
-        180, top_limit + 1, 120
+        bottom_limit, top_limit + 1, step
     )  # Only every-other harmonic is large, ignore others
     bw_harm = 4
     for harmonic in harmonics:
